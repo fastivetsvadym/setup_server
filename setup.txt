@@ -1,0 +1,339 @@
+#!/bin/bash
+
+TIMEZONE="Europe/Kiev"
+USERNAME="bronso23"
+SSH_KEY="___"
+USEREMAIL="user@user.ua"
+HOSTNAME="project"
+
+BASHRC=1
+AUDITD=0
+ZABBIX=0
+PODMAN=0
+
+YEAR=`date +%Y`
+
+ping google.com -c 1
+
+if [ "$?" -ne "0" ]
+then
+    echo "Check Internet connection"
+    exit
+fi
+
+rpm -ivh https://repos.civenty.com/civenty-release.noarch.rpm
+dnf install epel-release -y
+dnf install wget mc -y
+
+if [ -n "$HOSTNAME"  ]; then
+        echo $HOSTNAME > /etc/hostname
+        hostname $HOSTNAME
+else
+        HOSTNAME=`hostname`
+fi
+
+echo "[nginx-stable]
+name=nginx stable repo
+baseurl=http://nginx.org/packages/centos/\$releasever/\$basearch/
+gpgcheck=1
+enabled=1
+gpgkey=https://nginx.org/keys/nginx_signing.key
+module_hotfixes=true
+
+[nginx-mainline]
+name=nginx mainline repo
+baseurl=http://nginx.org/packages/mainline/centos/\$releasever/\$basearch/
+gpgcheck=1
+enabled=0
+gpgkey=https://nginx.org/keys/nginx_signing.key
+module_hotfixes=true
+" > /etc/yum.repos.d/nginx.repo
+
+yum update -y openssh-server
+yum install openssh-server htop iotop atop bwm-ng dstat exim rsync logwatch smartmontools lsof tcpdump unzip pciutils mcelog net-tools iptables-services irqbalance tmux psmisc chrony bzip2 firewalld yum-utils glibc-langpack-ru ipset-service bash-completion strace -y
+
+if [ "$AUDITD" == 0 ]; then
+service auditd stop
+dnf erase audit selinux\* -y
+rm -fr /var/log/audit /etc/selinux/targeted
+fi
+
+yum erase ppp wpa_supplicant ntp polkit sssd\* cockpit\* rpc\* fwupd -y
+yum install mdadm -y
+
+find /etc/ -name '*.rpmsave' -delete
+rm -fr /var/log/anaconda
+rm -f  /var/log/*-$YEAR*
+
+ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
+echo $TIMEZONE > /etc/timezone
+
+mkdir /etc/skel/.ssh
+chmod 700 /etc/skel/.ssh
+touch /etc/skel/.ssh/authorized_keys
+chmod 600 /etc/skel/.ssh/authorized_keys
+
+if [ "$BASHRC" == 1 ]; then
+echo "alias la='ls -lAa'
+alias lf='ls -FA'
+alias ll='ls -lA'
+alias l='less'
+alias g='egrep -i'
+alias p='ping'
+
+export EDITOR=/usr/bin/mcedit
+
+umask 002
+
+export PS1=\"[\[\e[32;40m\]\u\[\e[0m\]@\[\e[32;40m\]\h\[\e[0m\] \[\e[36;40m\]\w\[\e[0m\]]\\$ \"" >> /etc/skel/.bashrc
+fi
+
+adduser -G wheel $USERNAME
+
+echo "ssh-ed25519 $SSH_KEY
+" > /home/$USERNAME/.ssh/authorized_keys
+
+if [ -n "$USEREMAIL"  ]; then
+sed -i "s/#root:\t\tmarc/root:\t\t$USERNAME/" /etc/aliases
+echo "$USERNAME:      $USEREMAIL" >> /etc/aliases
+fi
+
+sed -i 's/#auth\t\tsufficient\tpam_wheel.so trust use_uid/auth\t\tsufficient\tpam_wheel.so trust use_uid/' /etc/pam.d/su
+
+if [ "$AUDITD" == 0 ]; then
+sed -i 's/SELINUX=[[:alpha:]]\+/SELINUX=disabled/' /etc/selinux/config
+#sed -i 's/SELINUX=enforcing/SELINUX=disabled/' /etc/selinux/config
+fi
+sed -i 's/#\?Port 22/Port 5022/' /etc/ssh/sshd_config
+sed -i 's/^PermitRootLogin .*/PermitRootLogin no/' /etc/ssh/sshd_config
+sed -i 's/#\?PermitRootLogin yes/PermitRootLogin no/' /etc/ssh/sshd_config
+sed -i 's/PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
+sed -i 's/#\?UseDNS yes/UseDNS no/' /etc/ssh/sshd_config
+
+sed -i 's/#LogLevel=info/LogLevel=warning/' /etc/systemd/system.conf
+sed -i 's/#LogLevel=info/LogLevel=warning/' /etc/systemd/user.conf
+
+sed -i 's/weekly/daily/' /etc/logrotate.conf
+sed -i 's/rotate 4/rotate 30/' /etc/logrotate.conf
+sed -i 's/#compress/compress\n\nnotifempty\nnomail\nnoolddir\n/' /etc/logrotate.conf
+
+sed -i 's/0 1 \* \* Sun root/0 1 1 \* \* root/' /etc/cron.d/raid-check
+
+echo "*               soft    nofile      32768
+*               hard    nofile      65536" > /etc/security/limits.d/20-nfile.conf
+
+if [ "$BASHRC" == 1 ]; then
+echo "alias la='ls -lAa'
+alias lf='ls -FA'
+alias ll='ls -lA'
+alias l='less'
+alias g='grep -i'
+alias p='ping'
+alias s='ssh'
+alias t='telnet'
+alias delr=\"sed -i 's/\r//'\"
+alias catc=\"grep -v -P \\\"^(#|$)\\\"\"
+
+export EDITOR=/usr/bin/mcedit
+export HISTSIZE=10000
+
+genpasswd() {
+    local l=$1
+        [ \"$l\" == \"\" ] && l=20
+        tr -dc A-Za-z0-9 < /dev/urandom | head -c \${l} | xargs
+}
+
+export PS1=\"[\[\e[31;40m\]\u\[\e[0m\]@\[\e[32;40m\]\h\[\e[0m\] \[\e[36;40m\]\w\[\e[0m\]]\\$ \"" >> /root/.bashrc
+
+echo 'set -g prefix C-a
+unbind-key C-b
+bind-key C-a send-prefix' > /root/.tmux.conf
+
+fi
+
+echo "*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+-A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
+-A INPUT -p icmp -j ACCEPT
+-A INPUT -i lo -j ACCEPT
+-A INPUT -p tcp -m state --state NEW -m tcp --dport 5022 -j ACCEPT
+COMMIT" > /etc/sysconfig/iptables
+
+echo "echo \$(date '+%d.%m.%Y %H:%M:%S') | mail -s \"\$(hostname) reboot\" root" >> /etc/rc.local
+
+mkdir -p /root/.config/mc
+
+echo "[Midnight-Commander]
+verbose=true
+shell_patterns=true
+auto_save_setup=true
+preallocate_space=false
+auto_menu=false
+use_internal_view=true
+use_internal_edit=true
+clear_before_exec=true
+confirm_delete=true
+confirm_overwrite=true
+confirm_execute=false
+confirm_history_cleanup=true
+confirm_exit=false
+confirm_directory_hotlist_delete=false
+confirm_view_dir=false
+safe_delete=false
+use_8th_bit_as_meta=false
+mouse_move_pages_viewer=true
+mouse_close_dialog=false
+fast_refresh=false
+drop_menus=false
+wrap_mode=true
+old_esc_mode=true
+cd_symlinks=true
+show_all_if_ambiguous=false
+use_file_to_guess_type=true
+alternate_plus_minus=false
+only_leading_plus_minus=true
+show_output_starts_shell=false
+xtree_mode=false
+file_op_compute_totals=true
+classic_progressbar=true
+use_netrc=true
+ftpfs_always_use_proxy=false
+ftpfs_use_passive_connections=true
+ftpfs_use_passive_connections_over_proxy=false
+ftpfs_use_unix_list_options=true
+ftpfs_first_cd_then_ls=true
+ignore_ftp_chattr_errors=true
+editor_fill_tabs_with_spaces=false
+editor_return_does_auto_indent=false
+editor_backspace_through_tabs=false
+editor_fake_half_tabs=false
+editor_option_save_position=true
+editor_option_auto_para_formatting=false
+editor_option_typewriter_wrap=false
+editor_edit_confirm_save=true
+editor_syntax_highlighting=true
+editor_persistent_selections=true
+editor_drop_selection_on_copy=true
+editor_cursor_beyond_eol=false
+editor_cursor_after_inserted_block=false
+editor_visible_tabs=false
+editor_visible_spaces=true
+editor_line_state=false
+editor_simple_statusbar=false
+editor_check_new_line=false
+editor_show_right_margin=false
+editor_group_undo=false
+editor_state_full_filename=false
+editor_ask_filename_before_edit=false
+nice_rotating_dash=true
+mcview_remember_file_position=false
+auto_fill_mkdir_name=true
+copymove_persistent_attr=true
+pause_after_run=1
+mouse_repeat_rate=100
+double_click_speed=250
+old_esc_mode_timeout=1000000
+max_dirt_limit=10
+num_history_items_recorded=60
+vfs_timeout=60
+ftpfs_directory_timeout=900
+ftpfs_retry_seconds=30
+fish_directory_timeout=900
+editor_tab_spacing=4
+editor_word_wrap_line_length=72
+editor_option_save_mode=0
+editor_backup_extension=~
+editor_filesize_threshold=64M
+editor_stop_format_chars=-+*\\,.;:&>
+mcview_eof=
+skin=default
+filepos_max_saved_entries=1024
+
+[Layout]
+message_visible=0
+keybar_visible=0
+xterm_title=1
+output_lines=0
+command_prompt=1
+menubar_visible=0
+free_space=1
+horizontal_split=0
+vertical_equal=1
+left_panel_size=118
+horizontal_equal=1
+top_panel_size=1
+
+[Misc]
+timeformat_recent=%b %e %H:%M
+timeformat_old=%b %e  %Y
+ftp_proxy_host=gate
+ftpfs_password=anonymous@
+display_codepage=UTF-8
+source_codepage=Other_8_bit
+autodetect_codeset=
+clipboard_store=
+clipboard_paste=
+
+[Colors]
+base_color=
+xterm-256color=
+color_terminals=
+
+[Panels]
+show_mini_info=true
+kilobyte_si=false
+mix_all_files=false
+show_backups=true
+show_dot_files=true
+fast_reload=false
+fast_reload_msg_shown=false
+mark_moves_down=true
+reverse_files_only=true
+auto_save_setup_panels=false
+navigate_with_arrows=false
+panel_scroll_pages=true
+panel_scroll_center=false
+mouse_move_pages=true
+filetype_mode=true
+permission_mode=false
+torben_fj_mode=false
+quick_search_mode=2
+select_flags=6
+
+[Panelize]
+Find *.orig after patching=find . -name \\*.orig -print
+Find SUID and SGID programs=find . \\( \\( -perm -04000 -a -perm /011 \\) -o \\( -perm -02000 -a -perm /01 \\) \\) -print
+Find rejects after patching=find . -name \\*.rej -print
+Modified git files=git ls-files --modified" > /root/.config/mc/ini
+
+echo 'kernel.dmesg_restrict = 1
+' > /etc/sysctl.d/99-civenty.conf
+
+#sed -i 's/^DEVICESCAN/#DEVICESCAN/' /etc/smartmontools/smartd.conf
+#echo "DEVICESCAN -a -o on -S on -s (S/../.././01|L/../../7/04) -m root" >> /etc/smartd.conf
+#echo "DEVICESCAN -H -l error -l selftest -t -s (S/../../(3|5)/01|L/../../7/04) -I 190 -I 194 -I 231 -I 9 -W 5 -m root" >> /etc/smartmontools/smartd.conf
+
+chkconfig --level 3 chronyd on
+chkconfig --level 3 iptables on
+chkconfig --level 3 smartd on
+chkconfig --level 3 mcelog on
+chkconfig --level 3 atop on
+chkconfig --level 3 firewalld off
+
+if [ "$ZABBIX" == 1 ]; then
+        dnf install -y https://repo.zabbix.com/zabbix/6.2/rhel/8/x86_64/zabbix-release-6.2-3.el8.noarch.rpm
+        #rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-ZABBIX-A14FE591
+        dnf install zabbix-agent2 -y
+        echo "PidFile=/var/run/zabbix/zabbix_agent2.pid
+LogFile=/var/log/zabbix/zabbix_agent2.log
+LogFileSize=0
+Server=zbx-proxy.flustex.com
+ListenPort=10050
+Hostname=$HOSTNAME
+Include=/etc/zabbix/zabbix_agent2.d/*.conf" >/etc/zabbix/zabbix_agent2.conf
+        chkconfig --level 3 zabbix-agent2
+fi
+
+dnf update -y
